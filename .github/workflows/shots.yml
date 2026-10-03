@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   shots:
-    runs-on: macos-14              # Apple Silicon 真机 runner → HVF 硬件加速
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -49,12 +49,19 @@ jobs:
           echo
           cat mock.log
 
+      - name: 打开 KVM 权限
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
       - name: 装 APK + 逐页走查截图
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 30
           target: default
-          arch: arm64-v8a
+          arch: x86_64
           profile: pixel_5
           disable-animations: true
           emulator-options: -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -camera-back none -camera-front none
@@ -93,5 +100,6 @@ jobs:
             echo "没有新文件"
           else
             git commit -m "ui shots: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git pull --rebase --autostash || true
             git push
           fi
