@@ -10,6 +10,11 @@ name: UI 截图走查
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'app/**'
+      - 'ci/**'
+      - 'mock/**'
+      - '.github/workflows/shots.yml'
   workflow_dispatch:
     inputs:
       apk:

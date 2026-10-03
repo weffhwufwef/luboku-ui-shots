@@ -1,0 +1,56 @@
+name: 探路：哪个 runner 能跑安卓模拟器
+
+# 只回答一件事: GitHub 托管的各种 runner 里, 哪个真的能跑**硬件加速**的安卓模拟器。
+#   Linux: 看 /dev/kvm 在不在、权限对不对、`emulator -accel-check` 说什么
+#   macOS: 看 kern.hv_support(1=Hypervisor.framework 可用) —— Apple Silicon runner 实测是 0
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/probe.yml'
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, ubuntu-24.04, ubuntu-22.04 ]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - name: KVM 现状
+        run: |
+          set -x
+          uname -a
+          ls -l /dev/kvm || echo "NO /dev/kvm"
+          grep -c -E 'vmx|svm' /proc/cpuinfo || true
+          id
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          ls "$ANDROID_SDK_ROOT" 2>/dev/null
+      - name: 开 KVM 权限并自检
+        run: |
+          set -x
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || echo "STILL NO /dev/kvm"
+          EMU="$ANDROID_SDK_ROOT/emulator/emulator"
+          if [ -x "$EMU" ]; then "$EMU" -accel-check || true; else echo "emulator 未预装"; fi
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-13, macos-14, macos-15, macos-15-intel ]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - name: HVF 现状
+        run: |
+          set -x
+          sw_vers
+          uname -m
+          sysctl kern.hv_support || echo "no kern.hv_support"
+          sysctl -n machdep.cpu.brand_string || true
+          system_profiler SPHardwareDataType 2>/dev/null | head -12 || true
