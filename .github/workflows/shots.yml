@@ -65,16 +65,9 @@ jobs:
           profile: pixel_5
           disable-animations: true
           emulator-options: -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -camera-back none -camera-front none
-          script: |
-            set -x
-            adb devices
-            adb shell getprop ro.build.version.release
-            APK="${{ github.event.inputs.apk || 'app/lubo-1.17.apk' }}"
-            adb install -r "$APK"
-            adb shell pm list packages | grep lubo || true
-            echo "--- 模拟器里能不能连到宿主 mock"
-            adb shell 'curl -s http://10.0.2.2:8090/ || echo (no curl in guest, 忽略)'
-            SHOT_DIR=shots python3 ci/drive.py
+          script: bash ci/run.sh
+        env:
+          APK: ${{ github.event.inputs.apk || 'app/lubo-1.17.apk' }}
 
       - name: 汇总
         if: always()
