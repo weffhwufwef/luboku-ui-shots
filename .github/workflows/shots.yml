@@ -1,0 +1,92 @@
+name: UI 截图走查
+
+# 在 GitHub 的 macOS runner 上跑一个**硬件加速**的安卓模拟器(GitHub 的 macOS runner 是
+# 真 Mac, 有 Hypervisor.framework, 所以不需要 KVM), 装上录播库 APK, 配一个 CI 模拟服务端
+# 喂数据, 然后用 uiautomator 把每个页面点一遍并截图, 最后把截图提交回仓库。
+#
+# 为什么不用 ubuntu runner: GitHub 托管 runner 默认不给 /dev/kvm(官方 issue 说明: runner
+# 本身就是 Azure 上的 VM, 安全策略不允许嵌套虚拟化), 只有付费 larger runner 才开。
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      apk:
+        description: 要测的 APK 路径(仓库内)
+        default: app/lubo-1.17.apk
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  shots:
+    runs-on: macos-14              # Apple Silicon 真机 runner → HVF 硬件加速
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          sw_vers
+          uname -m
+          python3 -V || true
+          echo "sdkmanager: $ANDROID_SDK_ROOT $ANDROID_HOME"
+          ls "$ANDROID_SDK_ROOT" 2>/dev/null | head
+
+      - name: 起 CI 模拟服务端
+        run: |
+          nohup python3 mock/server.py --port 8090 > mock.log 2>&1 &
+          sleep 3
+          echo "--- 探活"
+          curl -sS http://127.0.0.1:8090/ ; curl -sS http://127.0.0.1:8090/captcha.json
+          echo
+          cat mock.log
+
+      - name: 装 APK + 逐页走查截图
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: default
+          arch: arm64-v8a
+          profile: pixel_5
+          disable-animations: true
+          emulator-options: -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -camera-back none -camera-front none
+          script: |
+            set -x
+            adb devices
+            adb shell getprop ro.build.version.release
+            APK="${{ github.event.inputs.apk || 'app/lubo-1.17.apk' }}"
+            adb install -r "$APK"
+            adb shell pm list packages | grep lubo || true
+            echo "--- 模拟器里能不能连到宿主 mock"
+            adb shell 'curl -s http://10.0.2.2:8090/ || echo (no curl in guest, 忽略)'
+            SHOT_DIR=shots python3 ci/drive.py
+
+      - name: 汇总
+        if: always()
+        run: |
+          echo "=== report ==="; cat shots/report.md || true
+          echo "=== mock 请求 ==="; tail -60 mock.log || true
+          echo "=== logcat 可疑 ==="; cat shots/logcat_errors.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-shots
+          path: shots/
+          if-no-files-found: warn
+
+      - name: 把截图提交回仓库(公开仓库 → 外面不用 token 就能直接拉图)
+        if: always()
+        run: |
+          git config user.name "luboku-ci"
+          git config user.email "ci@luboku.invalid"
+          git add -f shots mock.log 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "没有新文件"
+          else
+            git commit -m "ui shots: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
