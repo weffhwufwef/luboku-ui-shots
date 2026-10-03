@@ -34,11 +34,11 @@ jobs:
 
       - name: 环境信息
         run: |
-          sw_vers
-          uname -m
+          uname -a
           python3 -V || true
+          ls -l /dev/kvm || true
+          nproc; free -m | head -2
           echo "sdkmanager: $ANDROID_SDK_ROOT $ANDROID_HOME"
-          ls "$ANDROID_SDK_ROOT" 2>/dev/null | head
 
       - name: 起 CI 模拟服务端
         run: |
