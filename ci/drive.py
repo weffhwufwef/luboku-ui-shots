@@ -399,8 +399,9 @@ def walk():
         shot("05_announce_sheet")
         if tap_text("服务端已升级到 v2 界面", contains=True, pause=1.8):
             shot("06_announce_dialog")
-            tap_text("好")
-            time.sleep(1.0)
+            # 2026-10-04 起公告详情是底部抽屉(可下拖取消), 收尾改点「取消」行
+            if not tap_text("取消", pause=1.0):
+                back()
         else:
             step("公告详情", False, "抽屉里没找到公告条目")
             back()
@@ -450,6 +451,12 @@ def walk():
         if wait_activity("PlayerActivity", 12, settle=3.0):
             hide_ime()
             shot("11_player_portrait")
+            # 2026-10-04 新口径: 播放中点画面 = 暂停(顺带截到中央大播放钮 + 分段进度条)
+            sh("input", "tap", 540, 530)
+            time.sleep(1.6)
+            shot("11g_player_paused")
+            sh("input", "tap", 540, 530)                     # 再点一下继续播
+            time.sleep(1.2)
             tap_text("分段 2", pause=2.2)                 # 分段条: 点第 2 张分段卡切段
             shot("11b_player_seg2")
             if tap_rid("fs", pause=3.5):                 # 竖屏点全屏 = 请求横屏(不做竖屏假全屏)

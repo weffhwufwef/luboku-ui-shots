@@ -14,7 +14,7 @@
   /api/links.json           ← 下载中心条目(数组)
   /api/users.json           ← {users:[...], exp_presets:{}}
   /api/site.json            ← {site:{icp,icp_link}}
-  /api/admin/storage.json   ← {record_disk,sys_disk,library:{by_anchor,top},overflow,policy,files,ts}
+  /api/admin/storage.json   ← {record_disk,sys_disk,rain_disk,library:{by_anchor,top},overflow,policy,files,ts}
   /api/watch/history.json   ← {history:[{key,title,position,duration,watched_at}]}
   /api/announcements.json   ← {announcements:[{title,body,date}]}
 时间字段一律**相对当前时刻动态生成**(北京时间), 这样在 CI 上永远有「今日」场次。
@@ -134,7 +134,7 @@ def videos(all_=False):
                 "title": anchor + " 【" + p["key"].split("/")[-1] + "】",
                 "anchor": anchor,
                 "url": "http://10.0.2.2:8090/media/" + p["key"].split("/")[-1],
-                "thumbnail": "",
+                "thumbnail": "http://10.0.2.2:8090/thumb/" + p["key"].split("/")[-1] + ".jpg",
                 "avatar": "",
                 "recorded_at": fmt(p["recorded"]),
                 "resolution": p["res"],
@@ -316,6 +316,11 @@ def storage():
                 dict(anchor="大坤", start_bj=fmt(ago(hours=9.1)), end_bj=fmt(ago(hours=6.6)),
                      size=1_180_000_000, segments=19),
             ]),
+        rain_disk=dict(used=5_470_940_218, total=100 * 1024 ** 3,
+                       free=100 * 1024 ** 3 - 5_470_940_218,
+                       pct=round(5_470_940_218 * 100.0 / (100 * 1024 ** 3), 1),
+                       objects=9, error="", space_gb=100, cap_gb=90, over_cap=False,
+                       note="雨云对象存储: 本地 OSS 桶水位告急时的整场溢出层(预签名直链, 不占 ECS 带宽)"),
         overflow=dict(over_limit=False, limit_pct=85.0, msg=""),
         policy=dict(keep_hours=72, priority_ratio=0.2, clean_at="04:00"),
         files=[
@@ -384,7 +389,22 @@ def captcha_png(w=104, h=40, seed=7):
             + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
+def _png_dot():
+    """1x1 灰点 PNG —— 缺缩略图时的占位图(不能空着, ImageLoader 会一直等)。"""
+    def chunk(tag, data):
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    head = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    raw = b"\x00\x40\x40\x40"
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+PNG_DOT = _png_dot()
 SAMPLE_BIN = b"luboku-ci-sample-payload\n" * 4096
+# 喂给播放器的真片段(与 mock/server.py 同目录); 缺了就退回占位字节
+MEDIA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample.mp4")
+THUMB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thumb.jpg")
 
 
 # --------------------------------------------------------------------------- HTTP
@@ -409,6 +429,32 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         if body:
             self.wfile.write(body)
+
+    def _thumb(self):
+        """分段缩略图: 一张静态图(mock/thumb.jpg); 缺了就 1x1 灰点。"""
+        try:
+            data = open(THUMB_FILE, "rb").read()
+        except OSError:
+            return self._send(200, PNG_DOT, "image/png")
+        return self._send(200, data, "image/jpeg")
+
+    def _media(self):
+        """真视频片段: 播放器在 CI 里必须真的能播 —— 不然播放页永远是错误页,
+        控制条尺寸 / 分段进度条 这些纯视觉项根本截不到。支持 Range(ExoPlayer 探 moov 会发)。"""
+        try:
+            data = open(MEDIA_FILE, "rb").read()
+        except OSError:
+            return self._send(200, SAMPLE_BIN, "application/octet-stream")
+        rng = self.headers.get("Range") or ""
+        m = re.match(r"bytes=(\d*)-(\d*)", rng)
+        if m and (m.group(1) or m.group(2)):
+            a = int(m.group(1) or 0)
+            b = min(int(m.group(2) or len(data) - 1), len(data) - 1)
+            if a <= b:
+                return self._send(206, data[a:b + 1], "video/mp4",
+                                  [("Content-Range", "bytes %d-%d/%d" % (a, b, len(data))),
+                                   ("Accept-Ranges", "bytes")])
+        return self._send(200, data, "video/mp4", [("Accept-Ranges", "bytes")])
 
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, ensure_ascii=False, indent=1), "application/json; charset=utf-8")
@@ -516,7 +562,11 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, LOGIN_HTML, "text/html; charset=utf-8")
         if p == "/logout":
             return self._send(302, "", "text/html", [("Set-Cookie", "lubo_sess=; Path=/; Max-Age=0")])
-        if p.startswith("/media/") or p.startswith("/preview/"):
+        if p.startswith("/media/"):
+            return self._media()
+        if p.startswith("/thumb/"):
+            return self._thumb()
+        if p.startswith("/preview/"):
             return self._send(200, SAMPLE_BIN, "application/octet-stream")
         if p.startswith("/app/lubo-"):
             return self._send(200, b"placeholder-apk", "application/vnd.android.package-archive")
