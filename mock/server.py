@@ -25,6 +25,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import os
 import random
 import re
 import struct
@@ -38,6 +39,11 @@ BJ = datetime.timezone(datetime.timedelta(hours=8))
 SESS = "lubo_sess=ci-" + hashlib.sha1(b"luboku-ci").hexdigest()[:12]
 LOG = []
 LOCK = threading.Lock()
+
+# App 自走查(截图走查包)把每页 PNG POST 到 /__shot?name=NN_xxx, 落在这里; GET /shots 可列可看。
+SHOTDIR = os.environ.get("LUBO_SHOT_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots_app"))
+# 走查包的「操作数据」(点谁了/接口状态码/耗时/崩因) —— 与截图配套, 截图看不出来的靠它。
+OPSFILE = os.environ.get("LUBO_OPS_FILE", os.path.join(os.path.dirname(SHOTDIR), "lubo_ops.jsonl"))
 
 
 def now_bj():
@@ -149,7 +155,9 @@ def videos(all_=False):
 def monitors():
     m1 = dict(name="小美", room_id="7758521", recording=True, live=True,
               current=dict(start_bj=fmt(ago(hours=3.5)), duration=12840, size=1_510_000_000,
-                           segments=27, clips=27, parts=1))
+                           segments=27, clips=27, parts=1,
+                           # 当前任务卡的 写入速率 / 完整度(站点 record_common.task_progress 的真实字段口径)
+                           elapsed=12900.0, rate=2_516_582.0, pct=99.2))
     m1["live_checked_at"] = now_bj().timestamp()
     m2 = dict(name="阿泽", room_id="6600123", recording=False, live=True, manual_stopped=False,
               last_session=fmt(ago(hours=7.2)), last_end=fmt(ago(hours=5.1)))
@@ -204,7 +212,8 @@ def record_status():
         ))
     oneoff = [dict(name="临时-发布会", room_id="4477889", recording=True,
                    current=dict(start_bj=fmt(ago(minutes=42)), duration=2520, size=310_000_000,
-                                segments=6, clips=6, parts=1),
+                                segments=6, clips=6, parts=1,
+                                elapsed=2560.0, rate=1_180_224.0, pct=98.4),
                    live_checked_at=now_bj().timestamp())]
     jobs = {}
     for m in monitors():
@@ -427,6 +436,42 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         p, q = u.path, parse_qs(u.query)
+        if p == "/__ops":
+            # 截图走查包: 「操作数据」一行一条 JSON(run_start/page/tap/click/api/err…), 直接追加落盘。
+            # 收到 run_start 就先清空 —— 一轮走查对应一份干净的操作流。
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n) if n else b""
+            text = raw.decode("utf-8", "replace")
+            try:
+                os.makedirs(os.path.dirname(OPSFILE), exist_ok=True)
+                if '"k":"run_start"' in text:
+                    open(OPSFILE, "w", encoding="utf-8").close()
+                with open(OPSFILE, "a", encoding="utf-8") as f:
+                    f.write(text if text.endswith("\n") else text + "\n")
+                # 兜底限长, 别把录制机的盘写满
+                with open(OPSFILE, encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                if len(lines) > 4000:
+                    with open(OPSFILE, "w", encoding="utf-8") as f:
+                        f.writelines(lines[-4000:])
+                self._log("/__ops", "%d 行" % text.count("\n"))
+            except Exception as e:
+                self._log("/__ops", "写盘失败 %s" % e)
+            return self._json({"ok": True, "bytes": len(raw)})
+        if p == "/__shot":
+            # 截图走查包: 原样收二进制(PNG)并落盘; 名字里的非法字符换掉
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n) if n else b""
+            name = re.sub(r"[^A-Za-z0-9_.\-]", "_", (q.get("name") or ["shot"])[0])[:80] or "shot"
+            try:
+                os.makedirs(SHOTDIR, exist_ok=True)
+                ext = ".png" if raw[:8] == b"\x89PNG\r\n\x1a\n" else ".bin"
+                with open(os.path.join(SHOTDIR, name + ext), "wb") as f:
+                    f.write(raw)
+                self._log("/__shot", "%s %d B" % (name, len(raw)))
+            except Exception as e:
+                self._log("/__shot", "写盘失败 %s" % e)
+            return self._json({"ok": True, "name": name, "bytes": len(raw)})
         body = self._body()
         form = {k: v[0] for k, v in parse_qs(body).items()}
         self._log(p, "form")
@@ -439,6 +484,26 @@ class H(BaseHTTPRequestHandler):
     def route_get(self, p, q):
         if p in ("/", "/index.html"):
             return self._send(200, "luboku ci mock\n", "text/plain; charset=utf-8")
+        if p == "/shots":
+            out = []
+            try:
+                for f in sorted(os.listdir(SHOTDIR)):
+                    fp = os.path.join(SHOTDIR, f)
+                    out.append({"name": f, "size": os.path.getsize(fp), "mtime": os.path.getmtime(fp)})
+            except FileNotFoundError:
+                pass
+            return self._json(out)
+        if p.startswith("/shots/"):
+            fp = os.path.join(SHOTDIR, os.path.basename(p[len("/shots/"):]))
+            if os.path.isfile(fp):
+                return self._send(200, open(fp, "rb").read(), "image/png")
+            return self._send(404, "no such shot", "text/plain; charset=utf-8")
+        if p == "/__ops":
+            try:
+                with open(OPSFILE, encoding="utf-8", errors="replace") as f:
+                    return self._send(200, f.read(), "text/plain; charset=utf-8")
+            except FileNotFoundError:
+                return self._send(200, "", "text/plain; charset=utf-8")
         if p == "/__log":
             return self._send(200, "\n".join(LOG), "text/plain; charset=utf-8")
         if p == "/captcha.json":
